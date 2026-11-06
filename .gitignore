@@ -1,0 +1,14 @@
+# Generated forecast reports
+reports/
+*.txt
+!requirements.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/

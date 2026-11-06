@@ -1,0 +1,92 @@
+# fishcast spots file
+# Required per spot: name, lat, lon
+# Optional per spot: station (force a NOAA station ID), notes,
+#   and any key from `settings` to override it for that spot only.
+
+settings:
+  calm_wind_mph: 8
+  max_wind_mph: 20
+  max_gust_mph: 28
+  max_wave_ft: 6
+  good_score: 60
+  window_hours: 24
+  prefer_tide: any          # any | incoming | outgoing
+  weights: {tide: 40, wind: 25, pressure: 15, light: 10, precip: 10}
+
+spots:
+  # ---------------- Bay Area: Pacific coast ----------------
+  - name: Marshall's Beach
+    lat: 37.8017
+    lon: -122.4799
+    notes: Below the Golden Gate; steep trail and stairs down
+
+  - name: Mussel Rock
+    lat: 37.6684
+    lon: -122.4942
+    notes: Rough scramble to the beach; heavy surf exposure
+
+  - name: Pacifica Pier
+    lat: 37.6330
+    lon: -122.4960
+    max_wave_ft: 8          # pier is high; tolerate more swell
+
+  - name: Pillar Point Harbor
+    lat: 37.4955
+    lon: -122.4856
+    notes: Jetty / harbor mouth
+
+  - name: San Gregorio State Beach
+    lat: 37.3230
+    lon: -122.4033
+    notes: Open surf beach; creek mouth lagoon
+
+  - name: Pescadero State Beach
+    lat: 37.2622
+    lon: -122.4133
+    notes: Open surf beach; marsh/creek mouth nearby
+
+  # ---------------- Bay Area: inside the bay ----------------
+  - name: Berkeley Pier
+    lat: 37.8634
+    lon: -122.3207
+    prefer_tide: incoming
+
+  - name: Coyote Point
+    lat: 37.5873
+    lon: -122.3191
+    notes: Park gate hours apply; one side can be very windy
+
+  - name: Dumbarton Pier
+    lat: 37.5103
+    lon: -122.1115
+    notes: Long walk in; gate closes ~4:45 PM most days; strong currents
+
+  # ---------------- San Diego ----------------
+  - name: Torrey Pines State Beach
+    lat: 32.9372
+    lon: -117.2617
+
+  - name: Black's Beach
+    lat: 32.8907
+    lon: -117.2535
+    notes: Long steep stairway down; exposed surf beach
+
+  - name: Mission Bay
+    lat: 32.7778
+    lon: -117.2265
+    notes: Centre of the bay; set a specific shoreline point if you have one
+
+  - name: Harbor Island
+    lat: 32.7253
+    lon: -117.2064
+    notes: San Diego Bay, sheltered
+
+  # ---------------- Palm Beach ----------------
+  - name: Juno Beach Pier
+    lat: 26.8939
+    lon: -80.0560
+
+  - name: Palm Beach Inlet
+    lat: 26.7720
+    lon: -80.0370
+    max_wind_mph: 15
