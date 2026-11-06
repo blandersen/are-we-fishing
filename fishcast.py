@@ -24,7 +24,10 @@ Data sources (both free, no API key):
   * NOAA CO-OPS Metadata API  -> list of tide-prediction stations (cached 30 days)
   * NOAA CO-OPS Data API      -> high/low tide predictions (product=predictions, interval=hilo)
   * Open-Meteo forecast API   -> wind, gusts, pressure, rain, cloud, sunrise/sunset
-  * Open-Meteo marine API     -> wave height (optional; silently skipped if unavailable)
+  * Open-Meteo marine API     -> wave height (a warning is printed if unavailable)
+
+For the raw conditions behind the score (tide chart, swell, buoys, wind,
+weather, NWS marine forecast), see conditions.py.
 
 The scoring is a transparent rule-of-thumb model, not gospel. Tune the
 numbers in the `settings:` block of your YAML (or DEFAULTS below).
@@ -36,6 +39,7 @@ import json
 import math
 import sys
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -58,6 +62,8 @@ DEFAULTS = {
     "max_gust_mph": 28,      # gusts above this -> flagged + capped
     "max_wave_ft": 6,        # waves above this -> flagged + capped
     "max_station_km": 40,    # warn if the nearest tide station is farther than this
+    "max_wave_grid_km": 10,  # warn if the wave model's grid point is farther than this
+    "waves": True,           # off for sheltered water the ocean wave model doesn't represent
     "prefer_tide": "any",    # any | incoming | outgoing
     "good_score": 60,        # threshold for "best windows"
     "window_hours": 24,      # how far ahead to search for best windows
@@ -78,6 +84,8 @@ class Spot:
     lon: float
     station: str | None = None          # optional NOAA station override
     notes: str = ""
+    buoy: str | None = None             # optional NDBC buoy override (conditions.py)
+    marine_zone: str | None = None      # optional NWS marine zone override (conditions.py)
     overrides: dict = field(default_factory=dict)  # per-spot settings
 
 
@@ -219,12 +227,16 @@ HOURLY_VARS = ["temperature_2m", "precipitation_probability", "precipitation", "
                "wind_gusts_10m"]
 
 
-def fetch_weather(lat: float, lon: float) -> dict:
-    """~1 week back + 16 days ahead, hourly, keyed by UTC hour. Also returns tz + sun times."""
+def fetch_weather(lat: float, lon: float, hourly_vars=HOURLY_VARS, daily_vars=()) -> dict:
+    """~1 week back + 16 days ahead, hourly, keyed by UTC hour. Also returns tz + sun times.
+
+    `daily` is keyed by local date string ("YYYY-MM-DD") and holds the requested daily_vars.
+    """
+    daily_req = ["sunrise", "sunset", *[v for v in daily_vars if v not in ("sunrise", "sunset")]]
     params = {
         "latitude": lat, "longitude": lon,
-        "hourly": ",".join(HOURLY_VARS),
-        "daily": "sunrise,sunset",
+        "hourly": ",".join(hourly_vars),
+        "daily": ",".join(daily_req),
         "timezone": "auto",
         "past_days": 7, "forecast_days": 16,
         "wind_speed_unit": "mph", "temperature_unit": "fahrenheit", "precipitation_unit": "inch",
@@ -240,26 +252,43 @@ def fetch_weather(lat: float, lon: float) -> dict:
     hourly = {}
     h = j["hourly"]
     for i, ts in enumerate(h["time"]):
-        hourly[to_utc(ts)] = {v: h[v][i] for v in HOURLY_VARS}
+        hourly[to_utc(ts)] = {v: h[v][i] for v in hourly_vars}
+    d = j["daily"]
+    daily = {day: {v: d[v][i] for v in daily_req} for i, day in enumerate(d["time"])}
     sun = []
-    for sr, ss in zip(j["daily"]["sunrise"], j["daily"]["sunset"]):
+    for sr, ss in zip(d["sunrise"], d["sunset"]):
         if sr and ss:
             sun.append((to_utc(sr), to_utc(ss)))
-    return {"tz": tz, "hourly": hourly, "sun": sun}
+    return {"tz": tz, "hourly": hourly, "daily": daily, "sun": sun}
 
 
-def fetch_waves(lat: float, lon: float) -> dict:
-    """Wave height (ft) keyed by UTC hour. Empty dict if the marine API has nothing here."""
+def fetch_marine(lat: float, lon: float, hourly_vars=("wave_height",),
+                 past_days: int = 2, forecast_days: int = 8) -> dict:
+    """Open-Meteo marine model, heights in ft and SST in °F, keyed by UTC hour.
+
+    Returns the model grid point actually used ("lat"/"lon"), which can sit several km
+    from the requested spot because the model snaps to its nearest sea cell.
+    """
+    r = SESSION.get(OM_MARINE, params={
+        "latitude": lat, "longitude": lon, "hourly": ",".join(hourly_vars),
+        "timezone": "GMT", "past_days": past_days, "forecast_days": forecast_days,
+        "length_unit": "imperial", "temperature_unit": "fahrenheit"}, timeout=30)
+    r.raise_for_status()
+    j = r.json()
+    h = j["hourly"]
+    hourly = {datetime.fromisoformat(ts).replace(tzinfo=UTC): {v: h[v][i] for v in hourly_vars}
+              for i, ts in enumerate(h["time"])}
+    return {"lat": j["latitude"], "lon": j["longitude"], "hourly": hourly}
+
+
+def fetch_waves(lat: float, lon: float) -> tuple[dict, dict | None, str | None]:
+    """(wave height ft by UTC hour, grid point {"lat","lon"} or None, error message or None)."""
     try:
-        r = SESSION.get(OM_MARINE, params={
-            "latitude": lat, "longitude": lon, "hourly": "wave_height",
-            "timezone": "GMT", "past_days": 2, "forecast_days": 8}, timeout=30)
-        r.raise_for_status()
-        h = r.json()["hourly"]
-        return {datetime.fromisoformat(ts).replace(tzinfo=UTC): (v * 3.28084 if v is not None else None)
-                for ts, v in zip(h["time"], h["wave_height"])}
-    except Exception:
-        return {}
+        m = fetch_marine(lat, lon)
+    except Exception as e:
+        return {}, None, str(e)
+    waves = {t: x["wave_height"] for t, x in m["hourly"].items()}
+    return waves, {"lat": m["lat"], "lon": m["lon"]}, None
 
 
 # ----------------------------------------------------------------------------
@@ -405,13 +434,26 @@ def evaluate_spot(spot, when_naive, hours, stations, base_cfg):
     except Exception as e:
         tides = []
         warnings.append(f"tides unavailable ({e})")
-    waves = fetch_waves(spot.lat, spot.lon)
+    # waves: off -> no swell cap; the header says so, and wind is the only chop signal
+    waves, wave_grid, wave_dist = {}, None, None
+    if cfg["waves"]:
+        waves, wave_grid, wave_err = fetch_waves(spot.lat, spot.lon)
+        if wave_grid:
+            wave_dist = haversine_km(spot.lat, spot.lon, wave_grid["lat"], wave_grid["lon"])
+        window = [waves.get(t0 + timedelta(hours=i)) for i in range(hours + 1)]
+        if wave_err:
+            warnings.append(f"wave model unavailable ({wave_err}); swell NOT checked")
+        elif all(v is None for v in window):
+            warnings.append("no wave data for this spot/time; swell NOT checked")
+        elif wave_dist > cfg["max_wave_grid_km"]:
+            warnings.append(f"wave model point is {wave_dist:.0f} km away; waves at your spot may differ")
 
     ranges = [abs(b.h - a.h) for a, b in zip(tides, tides[1:])]
     max_range = max(ranges) if ranges else 0
     hourly = [score_hour(t0 + timedelta(hours=i), tides, wx, waves, cfg, max_range)
               for i in range(hours + 1)]
     return {"spot": spot, "tz": tz, "station": station, "dist_km": dist, "tides": tides,
+            "wave_grid": wave_grid, "wave_dist_km": wave_dist,
             "hourly": hourly, "warnings": warnings, "cfg": cfg}
 
 
@@ -481,6 +523,12 @@ def print_spot_report(res, show_hourly, out=sys.stdout):
     if s.notes:
         print(f"  {s.notes}", file=out)
     print(f"  Tide station: {st['id']} {st['name']} {st['state']} ({res['dist_km']:.1f} km away)", file=out)
+    g = res.get("wave_grid")
+    if not res["cfg"]["waves"]:
+        print("  Wave model:   off for this spot (sheltered water; chop is judged by wind only)", file=out)
+    elif g:
+        print(f"  Wave model:   grid point ({g['lat']:.3f}, {g['lon']:.3f}), "
+              f"{res['wave_dist_km']:.1f} km away", file=out)
     for w in res["warnings"]:
         print(f"  ! {w}", file=out)
 
@@ -532,11 +580,11 @@ def load_spots_yaml(path):
     data = yaml.safe_load(Path(path).read_text()) or {}
     settings = data.get("settings", {}) or {}
     spots = []
+    known = {"name", "lat", "lon", "station", "notes", "buoy", "marine_zone"}
     for d in data.get("spots", []):
-        known = {"name", "lat", "lon", "station", "notes"}
+        opt = {k: str(d[k]) if d.get(k) else None for k in ("station", "buoy", "marine_zone")}
         spots.append(Spot(name=d["name"], lat=float(d["lat"]), lon=float(d["lon"]),
-                          station=str(d["station"]) if d.get("station") else None,
-                          notes=d.get("notes", ""),
+                          notes=d.get("notes", ""), **opt,
                           overrides={k: v for k, v in d.items() if k not in known}))
     return spots, settings
 
@@ -547,15 +595,43 @@ def parse_time(s):
     return datetime.fromisoformat(s.replace("T", " "))
 
 
-def report_path(a) -> Path | None:
-    """Where to save this run's report: --out, else <outdir>/<label>_<run time>.txt."""
+def slugify(label: str) -> str:
+    return "".join(c if c.isalnum() else "-" for c in label.lower()).strip("-") or "spot"
+
+
+def add_output_args(ap: argparse.ArgumentParser):
+    """Report-saving flags shared by fishcast.py and conditions.py."""
+    ap.add_argument("--outdir", default=str(Path(__file__).resolve().parent / "reports"),
+                    help="directory for saved reports (default: reports/ next to this script)")
+    ap.add_argument("--out", help="explicit report file path (overrides --outdir)")
+    ap.add_argument("--no-save", action="store_true", help="print to terminal only")
+
+
+def report_path(a, label: str, prefix: str = "") -> Path | None:
+    """Where to save this run's report: --out, else <outdir>/<prefix><label>_<run time>.txt."""
     if a.no_save:
         return None
     if a.out:
         return Path(a.out)
-    label = Path(a.spots).stem if a.spots else a.name
-    slug = "".join(c if c.isalnum() else "-" for c in label.lower()).strip("-") or "spot"
-    return Path(a.outdir) / f"{slug}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+    return Path(a.outdir) / f"{prefix}{slugify(label)}_{datetime.now().strftime('%Y%m%d-%H%M%S')}.txt"
+
+
+@contextmanager
+def report_output(path: Path | None, script: str, argv):
+    """Yield a stream that prints to the terminal and, if `path` is set, also to that file."""
+    if path is None:
+        yield sys.stdout
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as fh:
+        # Header goes to the file only; the terminal already shows the command.
+        fh.write(f"{Path(script).stem} report — generated {datetime.now().astimezone():%Y-%m-%d %H:%M %Z}\n")
+        fh.write(f"command: {' '.join([Path(script).name, *(argv if argv is not None else sys.argv[1:])])}\n")
+        try:
+            yield Tee(sys.stdout, fh)
+        finally:
+            sys.stdout.flush()
+            print(f"\nReport saved to {path}", file=sys.stderr)
 
 
 def main(argv=None):
@@ -569,10 +645,7 @@ def main(argv=None):
     ap.add_argument("--hours", type=int, help="hours ahead to search for best windows")
     ap.add_argument("--hourly", action="store_true", help="print hour-by-hour table")
     ap.add_argument("--refresh-stations", action="store_true")
-    ap.add_argument("--outdir", default=str(Path(__file__).resolve().parent / "reports"),
-                    help="directory for saved reports (default: reports/ next to this script)")
-    ap.add_argument("--out", help="explicit report file path (overrides --outdir)")
-    ap.add_argument("--no-save", action="store_true", help="print to terminal only")
+    add_output_args(ap)
     a = ap.parse_args(argv)
 
     cfg = json.loads(json.dumps(DEFAULTS))
@@ -589,18 +662,8 @@ def main(argv=None):
     stations = load_stations(a.refresh_stations)
     when = parse_time(a.time)
 
-    path = report_path(a)
-    fh = None
-    out = sys.stdout
-    if path:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        fh = path.open("w", encoding="utf-8")
-        out = Tee(sys.stdout, fh)
-        # Header goes to the file only; the terminal already shows the command.
-        fh.write(f"fishcast report — generated {datetime.now().astimezone():%Y-%m-%d %H:%M %Z}\n")
-        fh.write(f"command: {' '.join(['fishcast.py', *(argv if argv is not None else sys.argv[1:])])}\n")
-
-    try:
+    path = report_path(a, Path(a.spots).stem if a.spots else a.name)
+    with report_output(path, __file__, argv) as out:
         results = []
         for s in spots:
             try:
@@ -608,17 +671,9 @@ def main(argv=None):
                 results.append(r)
                 print_spot_report(r, a.hourly, out)
             except Exception as e:
-                msg = f"\n=== {s.name} === failed: {e}"
-                print(msg, file=sys.stderr)
-                if fh:
-                    print(msg, file=fh)
+                print(f"\n=== {s.name} === failed: {e}", file=out)
         if len(results) > 1:
             print_summary(results, out)
-    finally:
-        if fh:
-            fh.close()
-            sys.stdout.flush()
-            print(f"\nReport saved to {path}", file=sys.stderr)
 
 
 if __name__ == "__main__":

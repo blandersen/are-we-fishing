@@ -1,7 +1,9 @@
 # fishcast spots file
 # Required per spot: name, lat, lon
-# Optional per spot: station (force a NOAA station ID), notes,
-#   and any key from `settings` to override it for that spot only.
+# Optional per spot: station (force a NOAA tide station ID), notes,
+#   buoy (force an NDBC buoy ID) and marine_zone (force an NWS marine zone)
+#   for conditions.py, waves: off for sheltered water the ocean wave model
+#   doesn't represent, and any key from `settings` to override it for that spot only.
 
 settings:
   calm_wind_mph: 8
@@ -23,11 +25,13 @@ spots:
   - name: Mussel Rock
     lat: 37.6684
     lon: -122.4942
+    station: "9414275"      # Ocean Beach (outer coast); nearest by distance is a bay station
     notes: Rough scramble to the beach; heavy surf exposure
 
   - name: Pacifica Pier
     lat: 37.6330
     lon: -122.4960
+    station: "9414131"      # Pillar Point (outer coast); nearest by distance is a bay station
     max_wave_ft: 8          # pier is high; tolerate more swell
 
   - name: Pillar Point Harbor
@@ -55,11 +59,13 @@ spots:
     lat: 37.5873
     lon: -122.3191
     notes: Park gate hours apply; one side can be very windy
+    waves: off              # wave model's nearest cell is open ocean off Pillar Point
 
   - name: Dumbarton Pier
     lat: 37.5103
     lon: -122.1115
     notes: Long walk in; gate closes ~4:45 PM most days; strong currents
+    waves: off              # wave model has no data this far into the South Bay
 
   # ---------------- San Diego ----------------
   - name: Torrey Pines State Beach
@@ -75,6 +81,7 @@ spots:
     lat: 32.7778
     lon: -117.2265
     notes: Centre of the bay; set a specific shoreline point if you have one
+    waves: off              # wave model's nearest cell is ~6 km offshore in the open ocean
 
   - name: Harbor Island
     lat: 32.7253
@@ -85,6 +92,7 @@ spots:
   - name: Juno Beach Pier
     lat: 26.8939
     lon: -80.0560
+    station: "8722495"      # Jupiter Inlet south jetty; nearest by distance is on the ICWW
 
   - name: Palm Beach Inlet
     lat: 26.7720

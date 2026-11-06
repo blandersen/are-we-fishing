@@ -2,6 +2,7 @@
 reports/
 *.txt
 !requirements.txt
+*.png
 
 # Python
 __pycache__/
